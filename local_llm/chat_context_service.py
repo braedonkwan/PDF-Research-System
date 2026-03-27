@@ -7,7 +7,6 @@ from .chat_runtime import ChatRuntimeOptions
 from .context_pipeline import collect_context_for_query
 
 if TYPE_CHECKING:
-    from .last_rounds_buffer import LastRoundsBuffer
     from .rag import HierarchicalRagStore
     from .working_memory import WorkingMemoryStore
 
@@ -53,19 +52,11 @@ def collect_context_with_last_rounds(
     options: ChatRuntimeOptions,
     rag_store: "HierarchicalRagStore | None",
     working_memory_store: "WorkingMemoryStore | None",
-    last_rounds_buffer: "LastRoundsBuffer | None",
-    user_name: str,
-    assistant_name: str,
     last_n_rounds_override: list[dict[str, object]] | None = None,
     retrieval_query_text: str | None = None,
     recent_memory_exclude_last_turns: int = 0,
 ) -> RetrievedContext:
     last_rounds_text = last_n_rounds_override
-    if last_rounds_text is None and last_rounds_buffer is not None:
-        last_rounds_text = last_rounds_buffer.build_rounds(
-            user_name=user_name,
-            assistant_name=assistant_name,
-        )
     retrieval_query = (retrieval_query_text or query).strip() or query
     result = collect_query_context(
         retrieval_query,

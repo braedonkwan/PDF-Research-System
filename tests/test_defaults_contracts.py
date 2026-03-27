@@ -7,6 +7,13 @@ from local_llm.settings import load_settings
 
 
 class DefaultsContractsTests(unittest.TestCase):
+    def _assert_prompt_sections(self, prompt: str) -> None:
+        self.assertIn("Identity:", prompt)
+        self.assertIn("Objective:", prompt)
+        self.assertIn("Given context and usage:", prompt)
+        self.assertIn("Conflict handling:", prompt)
+        self.assertIn("Output style constraints:", prompt)
+
     def test_project_defaults_match_spec(self) -> None:
         root = Path(__file__).resolve().parents[1]
         config = load_settings(root / "settings.json")
@@ -31,13 +38,9 @@ class DefaultsContractsTests(unittest.TestCase):
         self.assertIn("Q&A agent", config.chat.system_prompt)
         self.assertIn("Q&A agent", config.runtime.agent_loop.agent1_system_prompt)
         self.assertIn("Critic agent", config.runtime.agent_loop.agent2_system_prompt)
-        self.assertIn("Identity:", config.chat.system_prompt)
-        self.assertIn("Objective:", config.chat.system_prompt)
-        self.assertIn("Given context and usage:", config.chat.system_prompt)
-        self.assertIn("Conflict handling:", config.chat.system_prompt)
-        self.assertIn("Output style constraints:", config.chat.system_prompt)
-        self.assertIn("Given context and usage:", config.runtime.agent_loop.agent1_system_prompt)
-        self.assertIn("Given context and usage:", config.runtime.agent_loop.agent2_system_prompt)
+        self._assert_prompt_sections(config.chat.system_prompt)
+        self._assert_prompt_sections(config.runtime.agent_loop.agent1_system_prompt)
+        self._assert_prompt_sections(config.runtime.agent_loop.agent2_system_prompt)
         self.assertNotIn("long_term_memory", config.chat.system_prompt)
         self.assertNotIn("long_term_memory", config.runtime.agent_loop.agent1_system_prompt)
         self.assertNotIn("long_term_memory", config.runtime.agent_loop.agent2_system_prompt)
