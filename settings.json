@@ -355,6 +355,7 @@
   },
   "runtime": {
     "last_n_rounds": 1,
+    "debug_output": false,
     "rag": {
       "mode": "auto",
       "min_child_score": 0.34,

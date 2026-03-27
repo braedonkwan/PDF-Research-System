@@ -20,6 +20,7 @@ class DefaultsContractsTests(unittest.TestCase):
 
         self.assertEqual(config.default_model, "qwen35_35b")
         self.assertEqual(config.runtime.last_n_rounds, 1)
+        self.assertFalse(config.runtime.debug_output)
         self.assertEqual(config.runtime.rag.top_k, 8)
         self.assertEqual(config.runtime.working_memory.recent_window_rounds, 5)
         self.assertEqual(config.runtime.working_memory.recent_top_k_rounds, 8)

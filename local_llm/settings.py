@@ -9,6 +9,7 @@ from typing import Any
 
 from .defaults import (
     DEFAULT_LAST_N_ROUNDS,
+    DEFAULT_DEBUG_OUTPUT,
     DEFAULT_AGENT1_NAME,
     DEFAULT_AGENT1_SYSTEM_PROMPT,
     DEFAULT_AGENT2_NAME,
@@ -166,6 +167,7 @@ class AgentLoopDefaultsConfig:
 @dataclass(frozen=True)
 class RuntimeDefaultsConfig:
     last_n_rounds: int = DEFAULT_LAST_N_ROUNDS
+    debug_output: bool = DEFAULT_DEBUG_OUTPUT
     rag: RagDefaultsConfig = field(default_factory=RagDefaultsConfig)
     working_memory: WorkingMemoryDefaultsConfig = field(
         default_factory=WorkingMemoryDefaultsConfig
@@ -806,6 +808,7 @@ def _parse_runtime(runtime_raw: Any, base_dir: Path) -> RuntimeDefaultsConfig:
     )
     return RuntimeDefaultsConfig(
         last_n_rounds=max(1, int(runtime.get("last_n_rounds", DEFAULT_LAST_N_ROUNDS))),
+        debug_output=bool(runtime.get("debug_output", DEFAULT_DEBUG_OUTPUT)),
         rag=rag,
         working_memory=working_memory,
         agent_loop=agent_loop,

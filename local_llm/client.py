@@ -448,8 +448,9 @@ def _run_contextual_turn(
         context_assistant_name=context_assistant_name,
         recent_memory_exclude_last_turns=recent_memory_exclude_last_turns,
     )
-    _print_context_status_lines(context_result)
-    _print_retrieval_query_and_context(context_result)
+    if options.debug_output:
+        _print_context_status_lines(context_result)
+        _print_retrieval_query_and_context(context_result)
     ok, reply = _stream_labeled_reply(
         client,
         label=label,

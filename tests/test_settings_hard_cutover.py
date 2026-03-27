@@ -29,10 +29,22 @@ class SettingsHardCutoverTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
         self.assertEqual(config.runtime.last_n_rounds, 1)
+        self.assertFalse(config.runtime.debug_output)
         self.assertEqual(config.runtime.rag.top_k, 8)
         self.assertEqual(config.runtime.working_memory.recent_window_rounds, 5)
         self.assertEqual(config.runtime.working_memory.recent_top_k_rounds, 8)
         self.assertEqual(config.runtime.working_memory.older_top_k_rounds, 5)
+
+    def test_runtime_debug_output_can_be_enabled(self) -> None:
+        payload = self._load_settings_dict()
+        payload.setdefault("runtime", {})["debug_output"] = True
+        path = self._write_temp_settings(payload)
+        try:
+            config = load_settings(path)
+        finally:
+            path.unlink(missing_ok=True)
+
+        self.assertTrue(config.runtime.debug_output)
 
     def test_deprecated_rag_keys_fail_fast(self) -> None:
         payload = self._load_settings_dict()

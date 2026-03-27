@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .defaults import (
     DEFAULT_LAST_N_ROUNDS,
+    DEFAULT_DEBUG_OUTPUT,
     DEFAULT_AGENT1_NAME,
     DEFAULT_AGENT1_SYSTEM_PROMPT,
     DEFAULT_AGENT2_NAME,
@@ -102,6 +103,7 @@ class AgentLoopRuntimeOptions:
 @dataclass(frozen=True)
 class ChatRuntimeOptions:
     last_n_rounds: int = DEFAULT_LAST_N_ROUNDS
+    debug_output: bool = DEFAULT_DEBUG_OUTPUT
     rag: RagRuntimeOptions = field(default_factory=RagRuntimeOptions)
     working_memory: WorkingMemoryRuntimeOptions = field(
         default_factory=WorkingMemoryRuntimeOptions
@@ -117,6 +119,7 @@ class ChatRuntimeOptions:
         )
         return ChatRuntimeOptions(
             last_n_rounds=max(1, int(self.last_n_rounds)),
+            debug_output=bool(self.debug_output),
             rag=self.rag.normalized(),
             working_memory=self.working_memory.normalized(),
             agent_loop=self.agent_loop.normalized(),

@@ -234,6 +234,7 @@ py -3 rag.py --config settings.json query --store .\data\rag_store\main --questi
 - `chat`: endpoint + generation settings + retries + system prompt.
 - `server`: `llama-server` launch settings.
 - `runtime.last_n_rounds`: explicit short-term round context size (default `1`).
+- `runtime.debug_output`: show/hide retrieval debug prints (`retrieval_query`, context payload, and retrieval status lines). Default `false`.
 - `runtime.rag`: RAG gates, top-k values, context size, chunk settings.
 - `runtime.working_memory`: memory gates, recent/older top-k, and exclusion controls.
 - `runtime.agent_loop`: critique loop enablement, naming, prompts.

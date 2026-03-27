@@ -54,6 +54,7 @@ def _runtime_defaults_from_config(config: AppConfig) -> ChatRuntimeOptions:
     runtime = config.runtime
     return ChatRuntimeOptions(
         last_n_rounds=runtime.last_n_rounds,
+        debug_output=runtime.debug_output,
         rag=RagRuntimeOptions(
             mode=runtime.rag.mode,
             min_child_score=runtime.rag.min_child_score,
@@ -89,6 +90,7 @@ def _resolve_runtime_options(
 ) -> ChatRuntimeOptions:
     return ChatRuntimeOptions(
         last_n_rounds=int(_coalesce(args.last_n_rounds, defaults.last_n_rounds)),
+        debug_output=defaults.debug_output,
         rag=RagRuntimeOptions(
             mode=str(_coalesce(args.rag_mode, defaults.rag.mode)),
             min_child_score=float(
