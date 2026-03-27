@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +34,7 @@ GENERIC_NON_DOC_QUERIES = {
     "how are you",
     "what's up",
 }
+_SPEAKER_LINE_RE = re.compile(r"^([^:]{1,80}):\s*(.*)$")
 
 def _is_document_intent_query(query: str) -> bool:
     normalized = query.lower()
@@ -62,16 +64,25 @@ def _should_apply_rag_context(
     if not retrieval.parent_hits:
         return False, "no parent hits"
 
-    top_child_score = float(retrieval.parent_hits[0].score)
+    if int(getattr(retrieval, "selected_child_count", 0)) > 0:
+        top_child_score = float(getattr(retrieval, "top_child_score", 0.0))
+    else:
+        top_child_score = float(retrieval.parent_hits[0].score)
+
     effective_min_score = max(0.0, min_child_score - (0.05 if document_intent else 0.0))
     if top_child_score < effective_min_score:
         return (
             False,
-            f"top parent score {top_child_score:.3f} below {effective_min_score:.3f}",
+            f"top child score {top_child_score:.3f} below {effective_min_score:.3f}",
         )
 
-    if len(retrieval.parent_hits) >= 2 and not document_intent:
-        second_score = float(retrieval.parent_hits[1].score)
+    if not document_intent:
+        if int(getattr(retrieval, "selected_child_count", 0)) >= 2:
+            second_score = float(getattr(retrieval, "second_child_score", 0.0))
+        elif len(retrieval.parent_hits) >= 2:
+            second_score = float(retrieval.parent_hits[1].score)
+        else:
+            second_score = 0.0
         score_margin = top_child_score - second_score
         if score_margin < min_score_margin:
             return False, f"ambiguous retrieval margin {score_margin:.3f}"
@@ -79,7 +90,7 @@ def _should_apply_rag_context(
     if len(query.split()) <= 2 and not document_intent:
         return False, "short non-document query"
 
-    return True, f"top parent score {top_child_score:.3f}"
+    return True, f"top child score {top_child_score:.3f}"
 
 
 def _should_apply_working_memory_context(
@@ -126,45 +137,204 @@ def _build_tagged_context_envelope(
     memory_payload: dict[str, object] | None,
     rag_payload: dict[str, object] | None,
 ) -> str:
+    merged_rounds = _merge_working_memory_rounds(
+        last_rounds=last_rounds,
+        memory_payload=memory_payload,
+    )
+    working_memory = _build_working_memory_entries(merged_rounds)
+    knowledge = _build_knowledge_entries(rag_payload)
     payload = {
-        "working_memory": {
-            "last_n_rounds": last_rounds or [],
-            "long_term_memory": memory_payload,
-        },
-        "knowledge": rag_payload,
+        "working_memory": working_memory,
+        "knowledge": knowledge,
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _split_memory_round_text(raw_text: str) -> tuple[str, str]:
-    user_lines: list[str] = []
-    assistant_lines: list[str] = []
-    active_role: str | None = None
+def _extract_memory_rounds(memory_payload: dict[str, object] | None) -> list[dict[str, object]]:
+    if not isinstance(memory_payload, dict):
+        return []
+    output: list[dict[str, object]] = []
+    for key in ("older_long_term_rounds", "recent_long_term_rounds", "rounds", "last_n_rounds"):
+        value = memory_payload.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                output.append(item)
+    return output
+
+
+def _round_order_key(round_item: dict[str, object]) -> tuple[int, int, int]:
+    turn_start = round_item.get("turn_start")
+    turn_end = round_item.get("turn_end")
+    round_index = round_item.get("round_index")
+    if isinstance(turn_start, int):
+        resolved_turn_start = int(turn_start)
+    else:
+        resolved_turn_start = 10**9
+    if isinstance(turn_end, int):
+        resolved_turn_end = int(turn_end)
+    else:
+        resolved_turn_end = resolved_turn_start
+    if isinstance(round_index, int):
+        resolved_round_index = int(round_index)
+    else:
+        resolved_round_index = 10**9
+    return (resolved_turn_start, resolved_turn_end, resolved_round_index)
+
+
+def _round_identity_key(round_item: dict[str, object]) -> tuple[str, str, str, str]:
+    user_query = round_item.get("user_query")
+    response = round_item.get("response")
+    user_speaker = ""
+    user_text = ""
+    response_speaker = ""
+    response_text = ""
+    if isinstance(user_query, dict):
+        user_speaker = str(user_query.get("speaker", "")).strip().lower()
+        user_text = str(user_query.get("text", "")).strip().lower()
+    if isinstance(response, dict):
+        response_speaker = str(response.get("speaker", "")).strip().lower()
+        response_text = str(response.get("text", "")).strip().lower()
+    return (user_speaker, user_text, response_speaker, response_text)
+
+
+def _build_working_memory_entries(
+    rounds: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    default_round_index = 1
+    for round_item in rounds:
+        round_index_raw = round_item.get("round_index")
+        if isinstance(round_index_raw, int):
+            round_index = int(round_index_raw)
+        else:
+            round_index = default_round_index
+        default_round_index = max(default_round_index, round_index + 1)
+
+        user_query = round_item.get("user_query")
+        if isinstance(user_query, dict):
+            role = str(user_query.get("speaker", "User")).strip() or "User"
+            content = str(user_query.get("text", "")).strip() or "(empty)"
+            entries.append(
+                {
+                    "round_index": round_index,
+                    "role": role,
+                    "content": content,
+                }
+            )
+
+        response = round_item.get("response")
+        if isinstance(response, dict):
+            role = str(response.get("speaker", "Assistant")).strip() or "Assistant"
+            content = str(response.get("text", "")).strip() or "(empty)"
+            entries.append(
+                {
+                    "round_index": round_index,
+                    "role": role,
+                    "content": content,
+                }
+            )
+    return entries
+
+
+def _build_knowledge_entries(rag_payload: dict[str, object] | None) -> list[dict[str, object]]:
+    if not isinstance(rag_payload, dict):
+        return []
+
+    entries: list[dict[str, object]] = []
+    parent_sections = rag_payload.get("parent_sections")
+    if isinstance(parent_sections, list):
+        for item in parent_sections:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source_path") or item.get("source_id") or "unknown-source").strip()
+            heading = str(item.get("heading", "")).strip()
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            content = text if not heading else f"{heading}: {text}"
+            entries.append(
+                {
+                    "source": source,
+                    "content": content,
+                }
+            )
+
+    if entries:
+        return entries
+
+    sources = rag_payload.get("sources")
+    if isinstance(sources, list):
+        for item in sources:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source_path") or item.get("source_id") or "unknown-source").strip()
+            if not source:
+                continue
+            entries.append(
+                {
+                    "source": source,
+                    "content": "",
+                }
+            )
+    return entries
+
+
+def _merge_working_memory_rounds(
+    *,
+    last_rounds: list[dict[str, object]] | None,
+    memory_payload: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    memory_rounds = sorted(_extract_memory_rounds(memory_payload), key=_round_order_key)
+    ordered_last_rounds = [item for item in (last_rounds or []) if isinstance(item, dict)]
+    merged = memory_rounds + ordered_last_rounds
+    deduped: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for round_item in merged:
+        identity = _round_identity_key(round_item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(round_item)
+    return deduped
+
+
+def _split_memory_round_messages(raw_text: str) -> list[tuple[str, str]]:
+    messages: list[tuple[str, str]] = []
+    active_speaker: str | None = None
+    active_lines: list[str] = []
+
+    def _flush_active() -> None:
+        nonlocal active_speaker, active_lines
+        if active_speaker is None:
+            return
+        text = " ".join(active_lines).strip() or "(empty)"
+        messages.append((active_speaker, text))
+        active_speaker = None
+        active_lines = []
+
     for line in raw_text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
-        lowered = stripped.lower()
-        if lowered.startswith("user:"):
-            active_role = "user"
-            value = stripped[5:].strip()
-            if value:
-                user_lines.append(value)
+        speaker_match = _SPEAKER_LINE_RE.match(stripped)
+        if speaker_match is not None:
+            _flush_active()
+            speaker = speaker_match.group(1).strip() or "User"
+            body = speaker_match.group(2).strip()
+            active_speaker = speaker
+            if body:
+                active_lines.append(body)
             continue
-        if lowered.startswith("assistant:"):
-            active_role = "assistant"
-            value = stripped[10:].strip()
-            if value:
-                assistant_lines.append(value)
-            continue
-        if active_role == "assistant":
-            assistant_lines.append(stripped)
-        else:
-            user_lines.append(stripped)
+        if active_speaker is None:
+            active_speaker = "User"
+        active_lines.append(stripped)
 
-    user_text = " ".join(user_lines).strip() or "(empty)"
-    assistant_text = " ".join(assistant_lines).strip() or "(empty)"
-    return user_text, assistant_text
+    _flush_active()
+    if not messages:
+        return [("User", "(empty)"), ("Assistant", "(empty)")]
+    return messages
 
 
 def _serialize_memory_rounds(
@@ -183,7 +353,14 @@ def _serialize_memory_rounds(
     )
     for hit in ordered_hits:
         raw_text = str(getattr(hit, "text", "")).strip()
-        user_text, assistant_text = _split_memory_round_text(raw_text)
+        messages = _split_memory_round_messages(raw_text)
+        user_speaker, user_text = messages[0]
+        if len(messages) >= 2:
+            response_speaker = messages[1][0]
+            response_text = " ".join(item[1] for item in messages[1:]).strip() or "(empty)"
+        else:
+            response_speaker = "Assistant"
+            response_text = "(empty)"
         payload.append(
             {
                 "round_id": getattr(hit, "parent_id", ""),
@@ -191,12 +368,12 @@ def _serialize_memory_rounds(
                 "turn_start": int(getattr(hit, "turn_start", 0)),
                 "turn_end": int(getattr(hit, "turn_end", 0)),
                 "user_query": {
-                    "speaker": "User",
+                    "speaker": user_speaker,
                     "text": user_text[:limit],
                 },
                 "response": {
-                    "speaker": "Assistant",
-                    "text": assistant_text[:limit],
+                    "speaker": response_speaker,
+                    "text": response_text[:limit],
                 },
             }
         )
@@ -368,6 +545,10 @@ def _collect_rag_context(
                 "decision": rag_decision,
                 "top_k": int(top_k),
                 "parent_context_chars": int(parent_context_chars),
+                "selected_child_count": int(getattr(retrieval, "selected_child_count", 0)),
+                "candidate_child_count": int(getattr(retrieval, "candidate_child_count", 0)),
+                "top_child_score": float(getattr(retrieval, "top_child_score", 0.0)),
+                "second_child_score": float(getattr(retrieval, "second_child_score", 0.0)),
             },
         }
         status_line = (

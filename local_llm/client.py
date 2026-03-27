@@ -21,19 +21,6 @@ if TYPE_CHECKING:
     from .rag import HierarchicalRagStore
     from .working_memory import WorkingMemoryStore
 
-RETRIEVAL_HELPER_SYSTEM_PROMPT = (
-    "Identity: You are the Retrieval Query Agent. "
-    "Objective: Produce one concise retrieval query that best represents the current user/agent intent for memory and PDF-RAG lookup. "
-    "System awareness: You only receive structured JSON input with keys latest_input, current_agent_system_prompt, and last_n_rounds, plus this system prompt. "
-    "No additional hidden context is provided. "
-    "Context usage rules: Treat latest_input as primary intent. Use current_agent_system_prompt and last_n_rounds (oldest-to-newest rounds with user_query/response fields) only for recall/disambiguation of entities, scope, and references. "
-    "Do not add unrelated terms or speculative expansions. "
-    "Conflict handling: If latest_input conflicts with prior rounds, prioritize latest_input. If intent is ambiguous, choose a safe broad query anchored to latest_input wording. "
-    "Output style constraints: Return strict JSON only with exactly one key: "
-    "{\"retrieval_query\":\"...\"}. No markdown, no code fences, no extra keys, no commentary."
-)
-
-
 def _create_session(chat: ChatConfig) -> requests.Session:
     session = requests.Session()
     retry = Retry(
@@ -67,42 +54,69 @@ def _add_optional_payload_fields(payload: dict[str, object], chat: ChatConfig) -
         payload["stop"] = list(chat.stop)
 
 
+def _normalize_working_memory_entries(raw_working_memory: Any) -> list[dict[str, object]]:
+    if not isinstance(raw_working_memory, list):
+        return []
+
+    entries: list[dict[str, object]] = []
+    next_round_index = 1
+    for item in raw_working_memory:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).strip() or "User"
+        content = str(item.get("content", "")).strip() or "(empty)"
+        round_index_raw = item.get("round_index")
+        if isinstance(round_index_raw, int):
+            round_index = int(round_index_raw)
+            next_round_index = max(next_round_index, round_index + 1)
+        else:
+            round_index = next_round_index
+            next_round_index += 1
+        entries.append(
+            {
+                "round_index": round_index,
+                "role": role,
+                "content": content,
+            }
+        )
+    return entries
+
+
+def _normalize_knowledge_entries(raw_knowledge: Any) -> list[dict[str, object]]:
+    if not isinstance(raw_knowledge, list):
+        return []
+    output: list[dict[str, object]] = []
+    for item in raw_knowledge:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source", "")).strip()
+        content = str(item.get("content", "")).strip()
+        if not source and not content:
+            continue
+        output.append({"source": source or "unknown-source", "content": content})
+    return output
+
+
 def _coerce_context_payload(context_text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(context_text)
     except json.JSONDecodeError:
         return {
-            "working_memory": {
-                "last_n_rounds": [],
-                "long_term_memory": None,
-            },
-            "knowledge": {"raw_context": context_text},
+            "working_memory": [],
+            "knowledge": [{"source": "raw_context", "content": context_text}],
         }
 
     if isinstance(parsed, dict):
-        working_memory = parsed.get("working_memory")
-        knowledge = parsed.get("knowledge")
-        if not isinstance(working_memory, dict):
-            working_memory = {
-                "last_n_rounds": [],
-                "long_term_memory": None,
-            }
-        else:
-            working_memory = {
-                "last_n_rounds": working_memory.get("last_n_rounds") or [],
-                "long_term_memory": working_memory.get("long_term_memory"),
-            }
+        working_memory = _normalize_working_memory_entries(parsed.get("working_memory"))
+        knowledge = _normalize_knowledge_entries(parsed.get("knowledge"))
         return {
             "working_memory": working_memory,
             "knowledge": knowledge,
         }
 
     return {
-        "working_memory": {
-            "last_n_rounds": [],
-            "long_term_memory": None,
-        },
-        "knowledge": {"raw_context": str(parsed)},
+        "working_memory": [],
+        "knowledge": [{"source": "raw_context", "content": str(parsed)}],
     }
 
 
@@ -223,51 +237,6 @@ class ChatClient:
             raise
         except Exception:
             raise
-
-
-def _parse_retrieval_query_reply(reply_text: str, *, fallback_query: str) -> str:
-    cleaned = reply_text.strip()
-    if not cleaned:
-        return fallback_query
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`").strip()
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:].strip()
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError:
-        first_line = cleaned.splitlines()[0].strip()
-        return first_line or fallback_query
-    if isinstance(payload, dict):
-        value = payload.get("retrieval_query")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return fallback_query
-
-
-def _build_retrieval_query(
-    helper_client: ChatClient,
-    *,
-    latest_input: str,
-    current_agent_system_prompt: str,
-    last_n_rounds: list[dict[str, object]] | None,
-) -> str:
-    fallback_query = latest_input.strip()
-    if not fallback_query:
-        return latest_input
-    helper_input = {
-        "latest_input": fallback_query,
-        "current_agent_system_prompt": current_agent_system_prompt.strip(),
-        "last_n_rounds": last_n_rounds or [],
-    }
-    helper_prompt = json.dumps(helper_input, ensure_ascii=False, separators=(",", ":"))
-    try:
-        response_text = ""
-        for piece in helper_client.stream_reply(helper_prompt, context_text=None):
-            response_text += piece
-        return _parse_retrieval_query_reply(response_text, fallback_query=fallback_query)
-    except Exception:
-        return fallback_query
 
 
 def _with_no_think_if_enabled(text: str, disable_thinking: bool) -> str:
@@ -420,8 +389,6 @@ def _collect_turn_context(
     *,
     query_prompt: str,
     retrieval_input: str,
-    current_agent_system_prompt: str,
-    retrieval_helper: ChatClient,
     options: ChatRuntimeOptions,
     rag_store: "HierarchicalRagStore | None",
     working_memory_store: "WorkingMemoryStore | None",
@@ -436,12 +403,7 @@ def _collect_turn_context(
             user_name=context_user_name,
             assistant_name=context_assistant_name,
         )
-    retrieval_query = _build_retrieval_query(
-        retrieval_helper,
-        latest_input=retrieval_input,
-        current_agent_system_prompt=current_agent_system_prompt,
-        last_n_rounds=last_n_rounds,
-    )
+    retrieval_query = retrieval_input.strip() or query_prompt.strip() or query_prompt
     return collect_context_with_last_rounds(
         query_prompt,
         options=options,
@@ -462,7 +424,6 @@ def _run_contextual_turn(
     label: str,
     prompt: str,
     retrieval_input: str,
-    retrieval_helper: ChatClient,
     options: ChatRuntimeOptions,
     rag_store: "HierarchicalRagStore | None",
     working_memory_store: "WorkingMemoryStore | None",
@@ -474,8 +435,6 @@ def _run_contextual_turn(
     context_result = _collect_turn_context(
         query_prompt=prompt,
         retrieval_input=retrieval_input,
-        current_agent_system_prompt=str(client.system_message.get("content", "")),
-        retrieval_helper=retrieval_helper,
         options=options,
         rag_store=rag_store,
         working_memory_store=working_memory_store,
@@ -492,14 +451,6 @@ def _run_contextual_turn(
         context_text=context_result.context_text,
     )
     return ok, reply, context_result
-
-
-def _build_retrieval_helper(config: AppConfig, model: ModelConfig) -> ChatClient:
-    return ChatClient(
-        config=config,
-        model=model,
-        system_prompt_override=RETRIEVAL_HELPER_SYSTEM_PROMPT,
-    )
 
 
 def _run_agent_loop_chat(
@@ -523,7 +474,6 @@ def _run_agent_loop_chat(
         model=model,
         system_prompt_override=loop_options.agent2_system_prompt,
     )
-    retrieval_helper = _build_retrieval_helper(config, model)
 
     agent1_memory_store: WorkingMemoryStore | None = None
     agent2_memory_store: WorkingMemoryStore | None = None
@@ -632,7 +582,6 @@ def _run_agent_loop_chat(
                 label=loop_options.agent1_name,
                 prompt=user_question,
                 retrieval_input=user_question,
-                retrieval_helper=retrieval_helper,
                 options=options,
                 rag_store=rag_store,
                 working_memory_store=agent1_memory_store,
@@ -644,7 +593,12 @@ def _run_agent_loop_chat(
             if not ok:
                 continue
 
-            agent1_last_rounds.append(user_question, agent1_reply)
+            agent1_last_rounds.append(
+                user_question,
+                agent1_reply,
+                input_speaker="User",
+                output_speaker=loop_options.agent1_name,
+            )
 
             if markdown_logger is not None:
                 markdown_logger.append_turn(
@@ -689,7 +643,6 @@ def _run_agent_loop_chat(
                     label=loop_options.agent2_name,
                     prompt=agent1_reply,
                     retrieval_input=agent1_reply,
-                    retrieval_helper=retrieval_helper,
                     options=options,
                     rag_store=rag_store,
                     working_memory_store=agent2_memory_store,
@@ -701,14 +654,18 @@ def _run_agent_loop_chat(
                 if not ok:
                     break
 
-                agent2_last_rounds.append(agent1_reply, agent2_reply)
+                agent2_last_rounds.append(
+                    agent1_reply,
+                    agent2_reply,
+                    input_speaker=loop_options.agent1_name,
+                    output_speaker=loop_options.agent2_name,
+                )
 
                 ok, next_agent1_reply, _ = _run_contextual_turn(
                     client=agent1,
                     label=loop_options.agent1_name,
                     prompt=agent2_reply,
                     retrieval_input=agent2_reply,
-                    retrieval_helper=retrieval_helper,
                     options=options,
                     rag_store=rag_store,
                     working_memory_store=agent1_memory_store,
@@ -722,7 +679,12 @@ def _run_agent_loop_chat(
 
                 agent1_reply = next_agent1_reply
                 round_index += 1
-                agent1_last_rounds.append(agent2_reply, agent1_reply)
+                agent1_last_rounds.append(
+                    agent2_reply,
+                    agent1_reply,
+                    input_speaker=loop_options.agent2_name,
+                    output_speaker=loop_options.agent1_name,
+                )
 
                 if markdown_logger is not None:
                     markdown_logger.append_turn(
@@ -755,7 +717,6 @@ def run_interactive_chat(
         )
 
     client = ChatClient(config=config, model=model)
-    retrieval_helper = _build_retrieval_helper(config, model)
     chat_rounds = LastRoundsBuffer(
         memory_store=working_memory_store,
         max_context_rounds=options.last_n_rounds,
@@ -816,7 +777,6 @@ def run_interactive_chat(
             label="Assistant",
             prompt=user,
             retrieval_input=user,
-            retrieval_helper=retrieval_helper,
             options=options,
             rag_store=rag_store,
             working_memory_store=working_memory_store,
@@ -827,7 +787,12 @@ def run_interactive_chat(
         )
         if not ok:
             continue
-        chat_rounds.append(user, assistant_text)
+        chat_rounds.append(
+            user,
+            assistant_text,
+            input_speaker="User",
+            output_speaker="Assistant",
+        )
         if markdown_logger is not None:
             markdown_logger.append_turn(
                 user_text=user,

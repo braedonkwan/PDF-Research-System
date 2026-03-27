@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 import threading
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -15,7 +16,7 @@ import numpy as np
 from .defaults import DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL
 from .persistent_storage import apply_persistent_cache_env_defaults
 
-STORE_VERSION = 3
+STORE_VERSION = 4
 BM25_K1 = 1.5
 BM25_B = 0.75
 HYBRID_VECTOR_WEIGHT = 0.62
@@ -110,6 +111,10 @@ class SourceHit:
 class RetrievalResult:
     source_hits: list[SourceHit] = field(default_factory=list)
     parent_hits: list[ParentHit] = field(default_factory=list)
+    top_child_score: float = 0.0
+    second_child_score: float = 0.0
+    selected_child_count: int = 0
+    candidate_child_count: int = 0
 
 
 def _load_sentence_transformer(model_name: str) -> Any:
@@ -422,6 +427,19 @@ def _prepare_query_for_lookup(query: str) -> tuple[str, list[str]]:
     return embedding_query, bm25_tokens
 
 
+def _reset_store_dir(store_dir: Path) -> None:
+    if store_dir.exists():
+        if not store_dir.is_dir():
+            raise ValueError(f"RAG store path exists and is not a directory: {store_dir}")
+        # Hard reset store contents so each ingest fully overwrites stale artifacts.
+        for child in store_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+    store_dir.mkdir(parents=True, exist_ok=True)
+
+
 def _is_heading_candidate(line: str) -> bool:
     if len(line) < 4 or len(line) > 120:
         return False
@@ -657,16 +675,13 @@ def ingest_pdfs_to_store(
         raise ValueError("Chunking produced no parent/child chunks. Adjust chunk sizing.")
 
     model = _load_sentence_transformer(embedding_model)
-    parent_embeddings = _encode_texts(
-        model, [chunk.text for chunk in parents], batch_size=batch_size
-    )
     child_embeddings = _encode_texts(
         model, [chunk.text for chunk in children], batch_size=batch_size
     )
     bm25_index = _build_bm25_index([chunk.text for chunk in children])
 
     out_dir = Path(store_dir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    _reset_store_dir(out_dir)
 
     manifest = {
         "version": STORE_VERSION,
@@ -688,7 +703,6 @@ def ingest_pdfs_to_store(
         "child_count": len(children),
         "stores": {
             "vector_db": {
-                "parent_embeddings": "parent_embeddings.npy",
                 "child_embeddings": "child_embeddings.npy",
                 "metric": "cosine",
             },
@@ -724,7 +738,6 @@ def ingest_pdfs_to_store(
         json.dumps(bm25_index, ensure_ascii=False),
         encoding="utf-8",
     )
-    np.save(out_dir / "parent_embeddings.npy", parent_embeddings)
     np.save(out_dir / "child_embeddings.npy", child_embeddings)
 
     return manifest
@@ -738,7 +751,6 @@ class HierarchicalRagStore:
         manifest: dict[str, Any],
         parents: list[ParentChunk],
         children: list[ChildChunk],
-        parent_embeddings: np.ndarray,
         child_embeddings: np.ndarray,
         bm25_index: dict[str, Any],
         embedding_model: Any,
@@ -749,7 +761,6 @@ class HierarchicalRagStore:
         self.manifest = manifest
         self.parents = parents
         self.children = children
-        self.parent_embeddings = parent_embeddings
         self.child_embeddings = child_embeddings
         self.bm25_index = bm25_index
         self.embedding_model = embedding_model
@@ -824,14 +835,11 @@ class HierarchicalRagStore:
 
         parents_raw = json.loads((base / "parents.json").read_text(encoding="utf-8"))
         children_raw = json.loads((base / "children.json").read_text(encoding="utf-8"))
-        parent_embeddings = np.load(base / "parent_embeddings.npy").astype(np.float32)
         child_embeddings = np.load(base / "child_embeddings.npy").astype(np.float32)
         bm25_index_path = base / "bm25_index.json"
 
         parents = [ParentChunk(**item) for item in parents_raw]
         children = [ChildChunk(**item) for item in children_raw]
-        if len(parents) != len(parent_embeddings):
-            raise ValueError("Parent metadata count does not match parent embedding count.")
         if len(children) != len(child_embeddings):
             raise ValueError("Child metadata count does not match child embedding count.")
 
@@ -862,7 +870,6 @@ class HierarchicalRagStore:
             manifest=manifest,
             parents=parents,
             children=children,
-            parent_embeddings=parent_embeddings,
             child_embeddings=child_embeddings,
             bm25_index=bm25_index,
             embedding_model=model,
@@ -958,6 +965,11 @@ class HierarchicalRagStore:
             self.children,
             max(top_k * 2, top_k),
         )
+        top_child_scores = [
+            float(combined_score_by_child_idx[idx])
+            for idx in top_child_indices
+            if idx in combined_score_by_child_idx
+        ]
 
         parent_score_by_id: dict[str, float] = {}
         for child_idx, combined_score in ranked_child_pairs:
@@ -1038,6 +1050,14 @@ class HierarchicalRagStore:
         return RetrievalResult(
             source_hits=source_hits,
             parent_hits=parent_hits,
+            top_child_score=(top_child_scores[0] if top_child_scores else 0.0),
+            second_child_score=(
+                top_child_scores[1]
+                if len(top_child_scores) >= 2
+                else 0.0
+            ),
+            selected_child_count=len(top_child_indices),
+            candidate_child_count=len(candidate_indices),
         )
 
     def format_context(

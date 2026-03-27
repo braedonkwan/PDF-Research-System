@@ -86,10 +86,9 @@ Per user question:
   - model context contains parent/round context plus metadata, not child snippets.
 - Final envelope:
   - model input is JSON with `working_memory`, `knowledge`, and `user_query`.
-  - `working_memory.last_n_rounds` stores explicit round objects with `user_query` + `response` in oldest-to-newest order.
-  - `working_memory.long_term_memory` carries recent/older retrieved long-term rounds and metadata.
-  - `knowledge` carries gated PDF-RAG parent context and source metadata.
-  - retrieval helper input is JSON with `latest_input`, `current_agent_system_prompt`, and `last_n_rounds`.
+  - `working_memory` is a single chronological list (oldest-to-newest) of entries with `round_index`, `role`, and `content`.
+  - `knowledge` is a list of supplemental entries with `source` and `content`.
+  - retrieval uses the current turn text directly as the lookup query (no separate retrieval agent).
 
 ## RAG System (PDF)
 
@@ -101,7 +100,7 @@ Ingest (`rag.py ingest`):
 4. Build child chunks (smaller retrieval units).
 5. Embed children with sentence-transformers.
 6. Build BM25 over child text.
-7. Persist artifacts to store directory.
+7. Overwrite the target store directory and persist fresh artifacts.
 
 Retrieve (`HierarchicalRagStore.retrieve`):
 
@@ -109,8 +108,8 @@ Retrieve (`HierarchicalRagStore.retrieve`):
 2. Run vector similarity + BM25.
 3. Union candidates and compute hybrid score.
 4. Optional cross-encoder rerank.
-5. Use child candidates internally, then promote/rank parent sections.
-6. Return top parent sections plus source metadata (parent-only output).
+5. Keep top reranked child candidates, then promote/rank related parent sections.
+6. Expose parent-only retrieval output plus child-score metadata for gating decisions.
 
 ## Working Memory System
 
@@ -138,7 +137,6 @@ Read path (`retrieve`):
 - `manifest.json`
 - `parents.json`
 - `children.json`
-- `parent_embeddings.npy`
 - `child_embeddings.npy`
 - `bm25_index.json`
 

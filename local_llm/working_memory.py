@@ -67,6 +67,7 @@ class MemoryEvent:
     role: str
     text: str
     created_at_utc: str
+    speaker: str | None = None
 
 
 @dataclass(frozen=True)
@@ -124,84 +125,20 @@ def _normalize_event_text(text: str) -> str:
     return cleaned
 
 
+def _normalize_speaker_label(speaker: str | None, *, fallback: str) -> str:
+    if speaker is None:
+        return fallback
+    cleaned = _WHITESPACE_RE.sub(" ", str(speaker)).strip()
+    return cleaned or fallback
+
+
+def _event_speaker_label(event: MemoryEvent) -> str:
+    fallback = "User" if event.role == "user" else "Assistant"
+    return _normalize_speaker_label(event.speaker, fallback=fallback)
+
+
 def _event_surface(event: MemoryEvent) -> str:
-    role_label = "User" if event.role == "user" else "Assistant"
-    return f"{role_label}: {event.text}".strip()
-
-
-def _build_parent_chunks(
-    events: list[MemoryEvent],
-    *,
-    parent_chunk_words: int,
-    parent_chunk_overlap_words: int,
-) -> list[MemoryParentChunk]:
-    if not events:
-        return []
-
-    flat_words: list[str] = []
-    flat_event_indices: list[int] = []
-    for event_idx, event in enumerate(events):
-        words = _event_surface(event).split()
-        if not words:
-            continue
-        flat_words.extend(words)
-        flat_event_indices.extend([event_idx] * len(words))
-
-    if not flat_words:
-        return []
-
-    spans = _chunk_words(flat_words, parent_chunk_words, parent_chunk_overlap_words)
-    parents: list[MemoryParentChunk] = []
-    for span_idx, (start, end) in enumerate(spans, start=1):
-        span_words = flat_words[start:end]
-        if not span_words:
-            continue
-        span_events = flat_event_indices[start:end]
-        event_start = int(min(span_events))
-        event_end = int(max(span_events))
-        parents.append(
-            MemoryParentChunk(
-                id=f"mp{span_idx:06d}",
-                text=" ".join(span_words),
-                word_start=start,
-                word_end=end,
-                word_count=len(span_words),
-                event_start=event_start,
-                event_end=event_end,
-                turn_start=events[event_start].turn_index,
-                turn_end=events[event_end].turn_index,
-            )
-        )
-    return parents
-
-
-def _build_child_chunks(
-    parents: list[MemoryParentChunk],
-    *,
-    child_chunk_words: int,
-    child_chunk_overlap_words: int,
-) -> list[MemoryChildChunk]:
-    children: list[MemoryChildChunk] = []
-    for parent in parents:
-        words = parent.text.split()
-        if not words:
-            continue
-        spans = _chunk_words(words, child_chunk_words, child_chunk_overlap_words)
-        for start, end in spans:
-            snippet_words = words[start:end]
-            if not snippet_words:
-                continue
-            children.append(
-                MemoryChildChunk(
-                    id=f"mc{len(children) + 1:07d}",
-                    parent_id=parent.id,
-                    text=" ".join(snippet_words),
-                    word_start=start,
-                    word_end=end,
-                    word_count=len(snippet_words),
-                )
-            )
-    return children
+    return f"{_event_speaker_label(event)}: {event.text}".strip()
 
 
 def _empty_bm25_index(
@@ -535,12 +472,24 @@ class WorkingMemoryStore:
         self._flat_event_indices = []
         self._rebuild_chunks_and_indexes()
 
-    def append_turn(self, user_text: str, assistant_text: str) -> None:
+    def append_turn(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        user_speaker: str = "User",
+        assistant_speaker: str = "Assistant",
+    ) -> None:
         normalized_user = _normalize_event_text(user_text)
         normalized_assistant = _normalize_event_text(assistant_text)
         if not normalized_user and not normalized_assistant:
             return
 
+        normalized_user_speaker = _normalize_speaker_label(user_speaker, fallback="User")
+        normalized_assistant_speaker = _normalize_speaker_label(
+            assistant_speaker,
+            fallback="Assistant",
+        )
         previous_event_count = len(self.events)
         previous_word_count = len(self._flat_words)
         next_turn_index = self.turn_count + 1
@@ -556,6 +505,7 @@ class WorkingMemoryStore:
                     role="user",
                     text=normalized_user,
                     created_at_utc=timestamp,
+                    speaker=normalized_user_speaker,
                 )
             )
         if normalized_assistant:
@@ -568,6 +518,7 @@ class WorkingMemoryStore:
                     role="assistant",
                     text=normalized_assistant,
                     created_at_utc=timestamp,
+                    speaker=normalized_assistant_speaker,
                 )
             )
         self._append_flat_word_cache(start_event_idx=previous_event_count)
@@ -1009,8 +960,8 @@ class WorkingMemoryStore:
             turn_index = int(event.turn_index)
             if turn_index < resolved_turn_floor or turn_index > resolved_turn_ceiling:
                 continue
-            role = "User" if event.role == "user" else "Assistant"
-            turn_lines.setdefault(turn_index, []).append(f"{role}: {event.text}")
+            speaker = _event_speaker_label(event)
+            turn_lines.setdefault(turn_index, []).append(f"{speaker}: {event.text}")
 
         parent_hits: list[MemoryParentHit] = []
         ranked_turn_indices = sorted(
