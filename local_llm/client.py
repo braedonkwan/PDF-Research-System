@@ -385,6 +385,14 @@ def _print_context_status_lines(context_result: RetrievedContext) -> None:
         print(line)
 
 
+def _print_retrieval_query_and_context(context_result: RetrievedContext) -> None:
+    print(f"retrieval_query:\n{context_result.retrieval_query_text}\n")
+    context_text = (context_result.context_text or "").strip()
+    if not context_text:
+        context_text = "(no context)"
+    print(f"context:\n{context_text}\n")
+
+
 def _collect_turn_context(
     *,
     query_prompt: str,
@@ -441,6 +449,7 @@ def _run_contextual_turn(
         recent_memory_exclude_last_turns=recent_memory_exclude_last_turns,
     )
     _print_context_status_lines(context_result)
+    _print_retrieval_query_and_context(context_result)
     ok, reply = _stream_labeled_reply(
         client,
         label=label,
