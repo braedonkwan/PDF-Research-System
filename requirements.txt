@@ -1,0 +1,5 @@
+requests>=2.31.0
+huggingface_hub>=0.20.0
+numpy>=1.26.0
+pypdf>=5.0.0
+sentence-transformers>=3.0.0
